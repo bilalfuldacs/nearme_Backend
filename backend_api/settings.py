@@ -31,11 +31,11 @@ ALLOWED_HOSTS = []
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
+    # 'django.contrib.admin',  # Disabled - Pure API, no admin interface needed
     'django.contrib.auth',
     'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
+    # 'django.contrib.sessions',  # Disabled - Using JWT auth only, no sessions needed
+    # 'django.contrib.messages',  # Disabled - API doesn't use Django messages framework
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
@@ -46,12 +46,12 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
+    # 'django.contrib.sessions.middleware.SessionMiddleware',  # Disabled - Using JWT auth only
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
+    # 'django.contrib.auth.middleware.AuthenticationMiddleware',  # Disabled - Using custom JWT auth
+    # 'django.contrib.messages.middleware.MessageMiddleware',  # Disabled - API doesn't need messages framework
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
@@ -66,7 +66,7 @@ TEMPLATES = [
             'context_processors': [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+                # 'django.contrib.messages.context_processors.messages',  # Disabled - messages framework not used
             ],
         },
     },
@@ -137,9 +137,9 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',  # Require auth for write operations
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'myapp.authentication.CustomJWTAuthentication',  # Use our custom JWT auth
-        'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.BasicAuthentication',
+        'myapp.authentication.CustomJWTAuthentication',  # Use our custom JWT auth only
+        # 'rest_framework.authentication.SessionAuthentication',  # Disabled - Using JWT only
+        # 'rest_framework.authentication.BasicAuthentication',  # Disabled - Using JWT only
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
