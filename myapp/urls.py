@@ -7,8 +7,14 @@ router = DefaultRouter()
 router.register(r'events', views.EventViewSet, basename='event')
 
 urlpatterns = [
+    # Category endpoints
+    path('categories/', views.get_categories, name='get_categories'),
+    
     # User endpoints
     path('create/', views.create_user, name='create_user'),
+    path('profile/', views.get_my_profile, name='get_my_profile'),  # GET user profile
+    path('profile/update/', views.update_my_profile, name='update_my_profile'),  # Update profile
+    path('profile/change-password/', views.change_password, name='change_password'),  # Change password
     
     # JWT Token endpoints (email-based authentication)
     path('token/', views.login_user, name='token_obtain'),

@@ -5,6 +5,25 @@ from django.contrib.auth.models import User as DjangoUser
 
 # Create your models here.
 
+class Category(models.Model):
+    """
+    Event categories (predefined, read-only)
+    """
+    name = models.CharField(max_length=100, unique=True, help_text="Category name")
+    description = models.TextField(blank=True, help_text="Category description")
+    icon = models.CharField(max_length=50, blank=True, help_text="Icon name or emoji")
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return self.name
+    
+    class Meta:
+        db_table = 'categories'
+        verbose_name = 'Category'
+        verbose_name_plural = 'Categories'
+        ordering = ['name']
+
+
 class User(models.Model):
     name = models.CharField(max_length=555)
     email = models.EmailField(unique=True)
@@ -69,6 +88,14 @@ class Event(models.Model):
     )
     organizer_name = models.CharField(max_length=255, default='', blank=True, help_text="Organizer name (from User)")
     organizer_email = models.EmailField(default='', blank=True, help_text="Organizer email (from User)")
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='events',
+        help_text="Event category"
+    )
     confirmed_attendees = models.PositiveIntegerField(default=0, help_text="Number of confirmed attendees")
     is_active = models.BooleanField(default=True, help_text="Whether the event is active")
     created_at = models.DateTimeField(auto_now_add=True)

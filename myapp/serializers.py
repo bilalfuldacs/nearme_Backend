@@ -1,9 +1,20 @@
 from rest_framework import serializers
-from .models import User, Event, EventImage, Conversation, Message
+from .models import User, Event, EventImage, Conversation, Message, Category
 import re
 from datetime import datetime, date, time
 from django.core.exceptions import ValidationError
 from django.contrib.auth.hashers import make_password
+
+
+class CategorySerializer(serializers.ModelSerializer):
+    """
+    Serializer for Category model (read-only)
+    """
+    class Meta:
+        model = Category
+        fields = ['id', 'name', 'description', 'icon']
+        read_only_fields = ['id', 'name', 'description', 'icon']
+
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -118,6 +129,7 @@ class EventSerializer(serializers.ModelSerializer):
     Comprehensive serializer for Event model with enhanced image handling
     """
     images = EventImageSerializer(many=True, read_only=True)
+    category_details = CategorySerializer(source='category', read_only=True)
     organizer_name = serializers.CharField(read_only=True)
     organizer_email = serializers.EmailField(read_only=True)
     full_address = serializers.CharField(read_only=True)
@@ -131,8 +143,8 @@ class EventSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = [
-            'id', 'title', 'description', 'max_attendees', 'confirmed_attendees',
-            'available_spots', 'is_full',
+            'id', 'title', 'description', 'category', 'category_details', 
+            'max_attendees', 'confirmed_attendees', 'available_spots', 'is_full',
             'start_date', 'end_date', 'start_time', 'end_time',
             'street', 'city', 'state', 'postal_code',
             'organizer_id', 'organizer_name', 'organizer_email',
@@ -172,7 +184,7 @@ class EventCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = [
-            'title', 'description', 'max_attendees',
+            'title', 'description', 'category', 'max_attendees',
             'start_date', 'end_date', 'start_time', 'end_time',
             'street', 'city', 'state', 'postal_code', 
             'organizer_id', 'images'
@@ -314,6 +326,7 @@ class EventListSerializer(serializers.ModelSerializer):
     """
     Enhanced serializer for event listing with comprehensive image handling
     """
+    category_details = CategorySerializer(source='category', read_only=True)
     organizer_name = serializers.CharField(read_only=True)
     organizer_email = serializers.EmailField(read_only=True)
     primary_image = serializers.SerializerMethodField()
@@ -328,8 +341,8 @@ class EventListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = [
-            'id', 'title', 'description', 'max_attendees', 'confirmed_attendees',
-            'available_spots', 'is_full',
+            'id', 'title', 'description', 'category', 'category_details',
+            'max_attendees', 'confirmed_attendees', 'available_spots', 'is_full',
             'start_date', 'end_date', 'start_time', 'end_time',
             'city', 'state', 'organizer_id', 'organizer_name', 'organizer_email',
             'is_active', 'created_at', 

@@ -13,8 +13,8 @@ from django.utils import timezone
 from django.contrib.auth.hashers import make_password, check_password
 from datetime import date
 from rest_framework_simplejwt.tokens import RefreshToken
-from .serializers import UserSerializer, LoginSerializer, EventSerializer, EventCreateSerializer, EventListSerializer, EventImageUploadSerializer, ConversationCreateSerializer, ConversationSerializer, MessageSerializer, ConversationStatusUpdateSerializer
-from .models import User, Event, EventImage, Conversation, Message
+from .serializers import UserSerializer, LoginSerializer, EventSerializer, EventCreateSerializer, EventListSerializer, EventImageUploadSerializer, ConversationCreateSerializer, ConversationSerializer, MessageSerializer, ConversationStatusUpdateSerializer, CategorySerializer
+from .models import User, Event, EventImage, Conversation, Message, Category
 from .jwt_utils import get_tokens_for_user
 
 @api_view(['POST'])
@@ -200,6 +200,181 @@ def refresh_token(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])  # Require authentication
+def get_my_profile(request):
+    """
+    Get current user's profile
+    GET /api/profile/
+    
+    Returns profile of the authenticated user
+    Authentication required: Yes
+    """
+    try:
+        user = request.user
+        
+        return Response({
+            'success': True,
+            'user': {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'created_at': user.created_at
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching profile',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])  # Require authentication
+@csrf_exempt
+def update_my_profile(request):
+    """
+    Update current user's profile
+    PUT/PATCH /api/profile/
+    
+    Request body (all fields optional for PATCH):
+    {
+        "name": "New Name",
+        "email": "newemail@example.com"
+    }
+    
+    Note: Cannot change password here, use change-password endpoint
+    Authentication required: Yes
+    """
+    try:
+        user = request.user
+        
+        # Get data
+        name = request.data.get('name')
+        email = request.data.get('email')
+        
+        # Update name if provided
+        if name:
+            user.name = name
+        
+        # Update email if provided and not already taken
+        if email and email != user.email:
+            # Check if email already exists
+            if User.objects.filter(email=email).exclude(id=user.id).exists():
+                return Response({
+                    'success': False,
+                    'message': 'Email already in use by another account'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            user.email = email
+        
+        user.save()
+        
+        return Response({
+            'success': True,
+            'message': 'Profile updated successfully',
+            'user': {
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'created_at': user.created_at
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while updating profile',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])  # Require authentication
+@csrf_exempt
+def change_password(request):
+    """
+    Change user's password
+    POST /api/profile/change-password/
+    
+    Request body:
+    {
+        "current_password": "oldpass123",
+        "new_password": "newpass123"
+    }
+    
+    Authentication required: Yes
+    """
+    try:
+        user = request.user
+        
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+        
+        if not current_password or not new_password:
+            return Response({
+                'success': False,
+                'message': 'Both current_password and new_password are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Verify current password
+        if not check_password(current_password, user.password):
+            return Response({
+                'success': False,
+                'message': 'Current password is incorrect'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate new password
+        if len(new_password) < 6:
+            return Response({
+                'success': False,
+                'message': 'New password must be at least 6 characters long'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update password
+        user.password = make_password(new_password)
+        user.save()
+        
+        return Response({
+            'success': True,
+            'message': 'Password changed successfully'
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while changing password',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])  # Public endpoint - no auth required
+def get_categories(request):
+    """
+    Get all event categories
+    GET /api/categories/
+    
+    Returns all predefined categories available for events
+    Authentication required: No
+    """
+    try:
+        categories = Category.objects.all()
+        serializer = CategorySerializer(categories, many=True)
+        
+        return Response({
+            'success': True,
+            'count': categories.count(),
+            'categories': serializer.data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching categories',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class EventViewSet(ModelViewSet):
@@ -213,9 +388,9 @@ class EventViewSet(ModelViewSet):
     queryset = Event.objects.all()
     serializer_class = EventSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['city', 'state', 'organizer_id', 'is_active', 'start_date']
-    search_fields = ['title', 'description', 'city', 'state']
-    ordering_fields = ['created_at', 'start_date', 'title', 'max_attendees']
+    filterset_fields = ['city', 'state', 'category', 'organizer_id', 'is_active']  # start_date and end_date handled in get_queryset()
+    search_fields = ['title', 'description', 'city', 'state', 'category__name']
+    ordering_fields = ['created_at', 'start_date', 'end_date', 'title', 'max_attendees']
     ordering = ['-created_at']
     
     def get_permissions(self):
@@ -250,9 +425,17 @@ class EventViewSet(ModelViewSet):
         start_date = self.request.query_params.get('start_date')
         end_date = self.request.query_params.get('end_date')
         
-        if start_date:
+        if start_date and end_date:
+            # Both dates provided: Get events starting BETWEEN these dates
+            queryset = queryset.filter(
+                start_date__gte=start_date,
+                start_date__lte=end_date
+            )
+        elif start_date:
+            # Only start_date: Get events starting on or AFTER this date
             queryset = queryset.filter(start_date__gte=start_date)
-        if end_date:
+        elif end_date:
+            # Only end_date: Get events ending on or BEFORE this date
             queryset = queryset.filter(end_date__lte=end_date)
         
         # Filter by upcoming events
