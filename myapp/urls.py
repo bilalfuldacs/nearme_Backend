@@ -9,22 +9,24 @@ router.register(r'events', views.EventViewSet, basename='event')
 urlpatterns = [
     # User endpoints
     path('create/', views.create_user, name='create_user'),
+    
+    # JWT Token endpoints (email-based authentication)
+    path('token/', views.login_user, name='token_obtain'),
+    path('token/refresh/', views.refresh_token, name='token_refresh'),
+    
+    # Legacy login endpoint (for backward compatibility)
     path('login/', views.login_user, name='login_user'),
     
-    # Conversation endpoints
-    path('conversations/', views.create_conversation, name='create_conversation'),
-    path('conversations/check/', views.check_conversation, name='check_conversation'),
-    path('conversations/<int:conversation_id>/', views.get_conversation, name='get_conversation'),
-    path('conversations/user/<int:user_id>/', views.get_user_conversations, name='get_user_conversations'),
-    path('conversations/user/<int:user_id>/confirmed-events/', views.get_user_confirmed_events, name='get_user_confirmed_events'),
-    path('conversations/event/<int:event_id>/', views.get_event_conversations, name='get_event_conversations'),
-    path('conversations/<int:conversation_id>/messages/', views.get_conversation_messages, name='get_conversation_messages'),
+    # Conversation endpoints (Active - Used by Frontend)
+    path('conversations/', views.create_conversation, name='create_conversation'),  # Create conversation & send messages
+    path('conversations/my-conversations/', views.get_my_conversations, name='get_my_conversations'),  # Get user's inbox
+    path('conversations/<int:conversation_id>/', views.get_conversation, name='get_conversation'),  # Get conversation with messages
+    path('conversations/event/<int:event_id>/my-conversation/', views.get_conversation_by_event, name='get_conversation_by_event'),  # Check my conversation for event
+    path('conversations/event/<int:event_id>/', views.get_event_conversations, name='get_event_conversations'),  # Get event attendees (host only)
+    path('conversations/<int:conversation_id>/status/', views.update_conversation_status, name='update_conversation_status'),  # Confirm/reject attendee
     
-    # Message endpoints
-    path('messages/', views.send_message, name='send_message'),
-    
-    # Conversation Status Update
-    path('conversations/<int:conversation_id>/status/', views.update_conversation_status, name='update_conversation_status'),
+    # Message endpoints (Active - Used by Frontend)
+    path('messages/mark-read/', views.mark_messages_as_read, name='mark_messages_as_read'),  # Mark messages as read
     
     # Event endpoints
     path('', include(router.urls)),

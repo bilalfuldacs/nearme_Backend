@@ -10,11 +10,11 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(Event)
 class EventAdmin(admin.ModelAdmin):
-    list_display = ['id', 'title', 'organizer', 'start_date', 'end_date', 'city', 'state', 'is_active', 'created_at']
+    list_display = ['id', 'title', 'organizer_name', 'organizer_email', 'start_date', 'end_date', 'city', 'state', 'is_active', 'created_at']
     list_filter = ['is_active', 'start_date', 'city', 'state', 'created_at']
-    search_fields = ['title', 'description', 'city', 'state']
+    search_fields = ['title', 'description', 'city', 'state', 'organizer_name', 'organizer_email']
     ordering = ['-created_at']
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = ['created_at', 'updated_at', 'organizer_name', 'organizer_email']
 
 @admin.register(EventImage)
 class EventImageAdmin(admin.ModelAdmin):

@@ -3,6 +3,7 @@ from .models import User, Event, EventImage, Conversation, Message
 import re
 from datetime import datetime, date, time
 from django.core.exceptions import ValidationError
+from django.contrib.auth.hashers import make_password
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -53,21 +54,39 @@ class LoginSerializer(serializers.Serializer):
     """
     Serializer for user login
     """
-    email = serializers.EmailField()
-    password = serializers.CharField()
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(required=True, write_only=True)
     
     def validate_email(self, value):
-        """Validation disabled for now"""
+        """Validate email is provided"""
+        if not value:
+            raise serializers.ValidationError("Email is required")
         return value
 
     
     def validate_password(self, value):
-        """Validation disabled for now"""
+        """Validate password is provided"""
+        if not value:
+            raise serializers.ValidationError("Password is required")
         return value
 
     
     def validate(self, attrs):
-        """Validation disabled for now"""
+        """Validate user credentials"""
+        email = attrs.get('email')
+        password = attrs.get('password')
+        
+        # Check if user exists
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("Invalid email or password")
+        
+        # Check if password matches
+        if user.password != password:
+            raise serializers.ValidationError("Invalid email or password")
+        
+        attrs['user'] = user
         return attrs
 
 
@@ -99,9 +118,11 @@ class EventSerializer(serializers.ModelSerializer):
     Comprehensive serializer for Event model with enhanced image handling
     """
     images = EventImageSerializer(many=True, read_only=True)
-    organizer_name = serializers.CharField(source='username', read_only=True)
-    organizer_email = serializers.EmailField(required=False)
+    organizer_name = serializers.CharField(read_only=True)
+    organizer_email = serializers.EmailField(read_only=True)
     full_address = serializers.CharField(read_only=True)
+    available_spots = serializers.IntegerField(read_only=True)
+    is_full = serializers.BooleanField(read_only=True)
     is_upcoming = serializers.BooleanField(read_only=True)
     is_past = serializers.BooleanField(read_only=True)
     primary_image = serializers.SerializerMethodField()
@@ -110,15 +131,16 @@ class EventSerializer(serializers.ModelSerializer):
     class Meta:
         model = Event
         fields = [
-            'id', 'title', 'description', 'max_attendees',
+            'id', 'title', 'description', 'max_attendees', 'confirmed_attendees',
+            'available_spots', 'is_full',
             'start_date', 'end_date', 'start_time', 'end_time',
             'street', 'city', 'state', 'postal_code',
-            'organizer', 'organizer_name', 'organizer_email',
+            'organizer_id', 'organizer_name', 'organizer_email',
             'is_active', 'created_at', 'updated_at',
             'images', 'primary_image', 'image_count',
             'full_address', 'is_upcoming', 'is_past'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'organizer_name', 'organizer_email', 'confirmed_attendees', 'available_spots', 'is_full']
     
     def get_primary_image(self, obj):
         """Get primary image URL"""
@@ -146,41 +168,15 @@ class EventCreateSerializer(serializers.ModelSerializer):
         allow_empty=True,
         help_text="List of base64 encoded images"
     )
-    organizer_name = serializers.CharField(write_only=True, required=False)
     
     class Meta:
         model = Event
         fields = [
             'title', 'description', 'max_attendees',
             'start_date', 'end_date', 'start_time', 'end_time',
-            'street', 'city', 'state', 'postal_code', 'organizer',
-            'username', 'email', 'organizer_email', 'organizer_name', 'images'
+            'street', 'city', 'state', 'postal_code', 
+            'organizer_id', 'images'
         ]
-    
-    def validate_start_time(self, value):
-        """Validation disabled for now"""
-        return value
-
-    
-    def validate_end_time(self, value):
-        """Validation disabled for now"""
-        return value
-
-    
-    def validate_username(self, value):
-        """Validation disabled for now"""
-        return value
-
-    
-    def validate_email(self, value):
-        """Validation disabled for now"""
-        return value
-
-    
-    def validate_organizer_email(self, value):
-        """Validation disabled for now"""
-        return value
-
     
     def create(self, validated_data):
         """Create event with base64 images"""
@@ -190,25 +186,12 @@ class EventCreateSerializer(serializers.ModelSerializer):
         from PIL import Image
         
         images_data = validated_data.pop('images', [])
-        organizer_name = validated_data.pop('organizer_name', None)
-        organizer_email = validated_data.get('organizer_email', '')
         
-        # Map organizer_name to username if provided
-        if organizer_name:
-            validated_data['username'] = organizer_name
-        
-        # Find or create organizer user based on organizer_email
-        if organizer_email:
-            try:
-                organizer_user = User.objects.get(email=organizer_email)
-            except User.DoesNotExist:
-                # Create new user if organizer doesn't exist
-                organizer_user = User.objects.create(
-                    name=organizer_name or 'Event Organizer',
-                    email=organizer_email,
-                    password='default_password'  # You might want to handle this differently
-                )
-            validated_data['organizer'] = organizer_user
+        # Get organizer info from the User and populate event fields
+        if 'organizer_id' in validated_data:
+            organizer = validated_data['organizer_id']
+            validated_data['organizer_name'] = organizer.name
+            validated_data['organizer_email'] = organizer.email
         
         event = Event.objects.create(**validated_data)
         
@@ -240,6 +223,74 @@ class EventCreateSerializer(serializers.ModelSerializer):
                 continue
         
         return event
+    
+    def update(self, instance, validated_data):
+        """Update event with base64 images"""
+        import base64
+        import io
+        from django.core.files.base import ContentFile
+        from PIL import Image
+        
+        # Check if images field was provided in the original request data
+        # Use initial_data because validated_data might not include empty arrays
+        images_provided = 'images' in self.initial_data
+        images_data = validated_data.pop('images', None)
+        
+        # If images_data is None but images were provided, get from initial_data
+        if images_provided and images_data is None:
+            images_data = self.initial_data.get('images', [])
+        
+        # Debug logging
+        print(f"DEBUG: images_provided = {images_provided}")
+        print(f"DEBUG: images_data = {images_data}")
+        print(f"DEBUG: initial_data keys = {self.initial_data.keys()}")
+        print(f"DEBUG: Type of images_data = {type(images_data)}")
+        
+        # Update organizer info if organizer_id changed
+        if 'organizer_id' in validated_data:
+            organizer = validated_data['organizer_id']
+            validated_data['organizer_name'] = organizer.name
+            validated_data['organizer_email'] = organizer.email
+        
+        # Update event fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Handle image updates only if images field was explicitly provided
+        if images_provided:
+            # Delete all existing images first
+            instance.images.all().delete()
+            
+            # Add new images if any were provided
+            if images_data:
+                for i, base64_string in enumerate(images_data):
+                    try:
+                        # Remove data URL prefix if present
+                        if ',' in base64_string:
+                            header, data = base64_string.split(',', 1)
+                        else:
+                            data = base64_string
+                        
+                        # Decode base64 data
+                        image_data = base64.b64decode(data)
+                        
+                        # Create a ContentFile from the decoded data
+                        image_file = ContentFile(image_data, name=f'image_{i+1}.png')
+                        
+                        # Create EventImage instance
+                        EventImage.objects.create(
+                            event=instance,
+                            image=image_file,
+                            is_primary=(i == 0)  # First image is primary
+                        )
+                        
+                    except Exception as e:
+                        # Log the error but don't fail the entire event update
+                        print(f"Error processing image {i+1}: {str(e)}")
+                        continue
+        
+        return instance
 
 
 class EventImageUploadSerializer(serializers.Serializer):
@@ -263,21 +314,24 @@ class EventListSerializer(serializers.ModelSerializer):
     """
     Enhanced serializer for event listing with comprehensive image handling
     """
-    organizer_name = serializers.CharField(source='username', read_only=True)
+    organizer_name = serializers.CharField(read_only=True)
     organizer_email = serializers.EmailField(read_only=True)
     primary_image = serializers.SerializerMethodField()
     all_images = serializers.SerializerMethodField()
     image_count = serializers.SerializerMethodField()
     full_address = serializers.CharField(read_only=True)
+    available_spots = serializers.IntegerField(read_only=True)
+    is_full = serializers.BooleanField(read_only=True)
     is_upcoming = serializers.BooleanField(read_only=True)
     is_past = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = Event
         fields = [
-            'id', 'title', 'description', 'max_attendees',
+            'id', 'title', 'description', 'max_attendees', 'confirmed_attendees',
+            'available_spots', 'is_full',
             'start_date', 'end_date', 'start_time', 'end_time',
-            'city', 'state', 'organizer_name', 'organizer_email',
+            'city', 'state', 'organizer_id', 'organizer_name', 'organizer_email',
             'is_active', 'created_at', 
             'primary_image', 'all_images', 'image_count', 
             'full_address', 'is_upcoming', 'is_past'
@@ -332,7 +386,7 @@ class ConversationCreateSerializer(serializers.ModelSerializer):
         fields = ['event_id', 'user_id', 'message']
     
     def create(self, validated_data):
-        """Create conversation and initial message"""
+        """Create conversation and add message (works for new and existing conversations)"""
         event_id = validated_data.pop('event_id')
         user_id = validated_data.pop('user_id')
         message_text = validated_data.pop('message')
@@ -341,8 +395,8 @@ class ConversationCreateSerializer(serializers.ModelSerializer):
         event = Event.objects.get(id=event_id)
         user = User.objects.get(id=user_id)
         
-        # Get host from event.organizer (this should now be the correct user)
-        host = event.organizer
+        # Get host from event.organizer_id (the field name in Event model)
+        host = event.organizer_id
         
         # Get or create conversation
         conversation, created = Conversation.objects.get_or_create(
@@ -352,27 +406,34 @@ class ConversationCreateSerializer(serializers.ModelSerializer):
             defaults={}
         )
         
-        # Create initial message if conversation is new
-        if created:
-            Message.objects.create(
-                conversation=conversation,
-                sender=user,
-                text=message_text
-            )
+        # Always create the message (whether conversation is new or existing)
+        Message.objects.create(
+            conversation=conversation,
+            sender=user,
+            text=message_text
+        )
         
         return conversation
 
 
 class MessageSerializer(serializers.ModelSerializer):
     """
-    Serializer for Message model
+    Serializer for Message model with full sender details and read status
     """
-    sender_name = serializers.CharField(source='sender.name', read_only=True)
+    sender = serializers.SerializerMethodField()
     
     class Meta:
         model = Message
-        fields = ['id', 'conversation', 'sender', 'sender_name', 'text', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'conversation', 'sender', 'text', 'is_read', 'read_at', 'created_at']
+        read_only_fields = ['id', 'created_at', 'read_at']
+    
+    def get_sender(self, obj):
+        """Get full sender details"""
+        return {
+            'id': obj.sender.id,
+            'name': obj.sender.name,
+            'email': obj.sender.email
+        }
 
 
 class ConversationSerializer(serializers.ModelSerializer):

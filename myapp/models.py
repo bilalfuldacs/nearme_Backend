@@ -14,6 +14,21 @@ class User(models.Model):
     def __str__(self):
         return self.name
     
+    # Required for Django REST Framework authentication
+    @property
+    def is_authenticated(self):
+        """
+        Always return True. This is a way to tell if the user has been authenticated.
+        """
+        return True
+    
+    @property
+    def is_anonymous(self):
+        """
+        Always return False. This is a way to tell if the user is anonymous.
+        """
+        return False
+    
     class Meta:
         db_table = 'users'
         verbose_name = 'User'
@@ -46,13 +61,14 @@ class Event(models.Model):
     postal_code = models.CharField(max_length=20, help_text="Postal/ZIP code")
     
     # Event Management
-    organizer = models.ForeignKey(
+    organizer_id = models.ForeignKey(
         User, 
         on_delete=models.CASCADE, 
         related_name='organized_events',
-        help_text="Event organizer"
+        help_text="Event organizer user reference"
     )
-    organizer_email = models.EmailField(default="", help_text="Event organizer email")
+    organizer_name = models.CharField(max_length=255, default='', blank=True, help_text="Organizer name (from User)")
+    organizer_email = models.EmailField(default='', blank=True, help_text="Organizer email (from User)")
     confirmed_attendees = models.PositiveIntegerField(default=0, help_text="Number of confirmed attendees")
     is_active = models.BooleanField(default=True, help_text="Whether the event is active")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -98,7 +114,7 @@ class Event(models.Model):
         indexes = [
             models.Index(fields=['start_date', 'end_date']),
             models.Index(fields=['city', 'state']),
-            models.Index(fields=['organizer']),
+            models.Index(fields=['organizer_id']),  # Fixed: organizer → organizer_id
             models.Index(fields=['is_active']),
         ]
 
@@ -166,15 +182,24 @@ class Conversation(models.Model):
 
 class Message(models.Model):
     """
-    Stores actual text messages
+    Stores actual text messages with read tracking
     """
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name="messages")
     sender = models.ForeignKey(User, on_delete=models.CASCADE)
     text = models.TextField()
+    is_read = models.BooleanField(default=False, help_text="Whether the message has been read by recipient")
+    read_at = models.DateTimeField(null=True, blank=True, help_text="When the message was read")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.sender.name}: {self.text[:20]}"
+    
+    class Meta:
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['conversation', '-created_at']),
+            models.Index(fields=['is_read']),
+        ]
 
 
 

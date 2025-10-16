@@ -1,19 +1,24 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.db.models import Q
 from django.utils import timezone
+from django.contrib.auth.hashers import make_password, check_password
 from datetime import date
+from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import UserSerializer, LoginSerializer, EventSerializer, EventCreateSerializer, EventListSerializer, EventImageUploadSerializer, ConversationCreateSerializer, ConversationSerializer, MessageSerializer, ConversationStatusUpdateSerializer
 from .models import User, Event, EventImage, Conversation, Message
+from .jwt_utils import get_tokens_for_user
 
 @api_view(['POST'])
+@permission_classes([AllowAny])  # Allow signup without authentication
 @csrf_exempt
 def create_user(request):
     try:
@@ -25,9 +30,18 @@ def create_user(request):
                 'error': 'Missing request data'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        serializer = UserSerializer(data=request.data)
+        # Hash the password before saving
+        data = request.data.copy()
+        if 'password' in data:
+            data['password'] = make_password(data['password'])
+        
+        serializer = UserSerializer(data=data)
         if serializer.is_valid():
             user = serializer.save()
+            
+            # Generate JWT tokens for the new user (custom User model)
+            tokens = get_tokens_for_user(user)
+            
             return Response({
                 'success': True,
                 'message': 'User created successfully',
@@ -36,7 +50,8 @@ def create_user(request):
                     'id': user.id,
                     'name': user.name,
                     'email': user.email
-                }
+                },
+                'tokens': tokens
             }, status=status.HTTP_201_CREATED)
         
         # Send structured error response
@@ -54,10 +69,28 @@ def create_user(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['POST'])
+@permission_classes([AllowAny])  # Allow login without authentication
 def login_user(request):
     """
-    Login user endpoint
-    POST /api/login/
+    Custom JWT Token endpoint for email-based login
+    POST /api/token/
+    
+    Request body:
+    {
+        "email": "user@example.com",
+        "password": "password123"
+    }
+    
+    Response:
+    {
+        "success": true,
+        "message": "Login successful",
+        "user": {...},
+        "tokens": {
+            "refresh": "refresh_token_here",
+            "access": "access_token_here"
+        }
+    }
     """
     try:
         email = request.data.get('email')
@@ -69,16 +102,32 @@ def login_user(request):
                 'message': 'Email is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Find user by email (no validation)
+        if not password:
+            return Response({
+                'success': False,
+                'message': 'Password is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Find user by email
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
             return Response({
                 'success': False,
-                'message': 'User not found'
-            }, status=status.HTTP_404_NOT_FOUND)
+                'message': 'Invalid email or password'
+            }, status=status.HTTP_401_UNAUTHORIZED)
         
-        # Return success response (no password validation)
+        # VALIDATE PASSWORD - Check if password matches (with hashing support)
+        if not check_password(password, user.password):
+            return Response({
+                'success': False,
+                'message': 'Invalid email or password'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Generate JWT tokens for custom User model
+        tokens = get_tokens_for_user(user)
+        
+        # Return success response with tokens
         return Response({
             'success': True,
             'message': 'Login successful',
@@ -87,7 +136,8 @@ def login_user(request):
                 'name': user.name,
                 'email': user.email,
                 'created_at': user.created_at
-            }
+            },
+            'tokens': tokens
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
@@ -99,25 +149,92 @@ def login_user(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Allow token refresh without authentication
+def refresh_token(request):
+    """
+    Refresh JWT Token endpoint
+    POST /api/token/refresh/
+    
+    Request body:
+    {
+        "refresh": "refresh_token_here"
+    }
+    
+    Response:
+    {
+        "success": true,
+        "access": "new_access_token_here"
+    }
+    """
+    try:
+        from rest_framework_simplejwt.tokens import RefreshToken
+        
+        refresh_token = request.data.get('refresh')
+        
+        if not refresh_token:
+            return Response({
+                'success': False,
+                'message': 'Refresh token is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate and refresh the token
+        try:
+            refresh = RefreshToken(refresh_token)
+            return Response({
+                'success': True,
+                'access': str(refresh.access_token)
+            }, status=status.HTTP_200_OK)
+        except Exception as token_error:
+            return Response({
+                'success': False,
+                'message': 'Invalid or expired refresh token',
+                'error': str(token_error)
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred during token refresh',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 
 
 class EventViewSet(ModelViewSet):
     """
     ViewSet for Event CRUD operations with filtering and search capabilities
+    
+    Permissions:
+    - List/Retrieve: Anyone (no auth required)
+    - Create/Update/Delete: Authenticated users only
     """
     queryset = Event.objects.all()
     serializer_class = EventSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['city', 'state', 'organizer', 'is_active', 'start_date']
+    filterset_fields = ['city', 'state', 'organizer_id', 'is_active', 'start_date']
     search_fields = ['title', 'description', 'city', 'state']
     ordering_fields = ['created_at', 'start_date', 'title', 'max_attendees']
     ordering = ['-created_at']
+    
+    def get_permissions(self):
+        """
+        Set permissions based on action
+        All event operations require authentication
+        """
+        from rest_framework.permissions import IsAuthenticated
+        
+        # All operations require authentication
+        permission_classes = [IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
     
     def get_serializer_class(self):
         """
         Return appropriate serializer based on action
         """
-        if self.action == 'create':
+        if self.action in ['create', 'update', 'partial_update']:
             return EventCreateSerializer
         elif self.action == 'list':
             return EventListSerializer
@@ -127,7 +244,7 @@ class EventViewSet(ModelViewSet):
         """
         Filter queryset based on query parameters
         """
-        queryset = Event.objects.select_related('organizer').prefetch_related('images')
+        queryset = Event.objects.select_related('organizer_id').prefetch_related('images')
         
         # Filter by date range
         start_date = self.request.query_params.get('start_date')
@@ -272,31 +389,9 @@ class EventViewSet(ModelViewSet):
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    def destroy(self, request, *args, **kwargs):
-        """
-        Delete an event (soft delete by setting is_active=False)
-        """
-        try:
-            instance = self.get_object()
-            instance.is_active = False
-            instance.save()
-            
-            return Response({
-                'success': True,
-                'message': 'Event deleted successfully'
-            }, status=status.HTTP_200_OK)
-            
-        except Event.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'Event not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'An error occurred while deleting the event',
-                'error': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    # REMOVED: destroy() method - Not used by frontend
+    # DELETE /api/events/{id}/ endpoint removed as per frontend documentation
+    # If needed in future, soft delete can be implemented via toggle_active or is_active field
     
     @action(detail=False, methods=['get'])
     def upcoming(self, request):
@@ -404,34 +499,9 @@ class EventViewSet(ModelViewSet):
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    @action(detail=True, methods=['post'])
-    def toggle_active(self, request, pk=None):
-        """
-        Toggle event active status
-        """
-        try:
-            event = self.get_object()
-            event.is_active = not event.is_active
-            event.save()
-            
-            status_text = 'activated' if event.is_active else 'deactivated'
-            return Response({
-                'success': True,
-                'message': f'Event {status_text} successfully',
-                'is_active': event.is_active
-            }, status=status.HTTP_200_OK)
-            
-        except Event.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'Event not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({
-                'success': False,
-                'message': 'An error occurred while updating event status',
-                'error': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    # REMOVED: toggle_active() action - Not used by frontend
+    # POST /api/events/{id}/toggle_active/ endpoint removed as per frontend documentation
+    # If needed in future, can be re-implemented or use PATCH /api/events/{id}/ to update is_active field
     
     @action(detail=True, methods=['post'])
     def upload_images(self, request, pk=None):
@@ -505,104 +575,124 @@ class EventViewSet(ModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-@api_view(['GET'])
-def check_conversation(request):
-    """
-    Check if conversation exists for user and event
-    GET /api/conversations/check/?user_id=1&event_id=1
-    """
-    try:
-        user_id = request.GET.get('user_id')
-        event_id = request.GET.get('event_id')
-        
-        if not user_id or not event_id:
-            return Response({
-                'success': False,
-                'message': 'Both user_id and event_id parameters are required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Check if conversation exists
-        try:
-            conversation = Conversation.objects.get(
-                user_id=user_id,
-                event_id=event_id
-            )
-            
-            # Get the last message for additional info
-            last_message = conversation.messages.last()
-            last_message_text = last_message.text if last_message else None
-            last_message_time = last_message.created_at if last_message else None
-            
-            return Response({
-                'success': True,
-                'exists': True,
-                'conversation_id': conversation.id,
-                'event_id': conversation.event.id,
-                'user_id': conversation.user.id,
-                'host_id': conversation.host.id,
-                'created_at': conversation.created_at,
-                'last_message': last_message_text,
-                'last_message_time': last_message_time,
-                'message_count': conversation.messages.count()
-            }, status=status.HTTP_200_OK)
-            
-        except Conversation.DoesNotExist:
-            return Response({
-                'success': True,
-                'exists': False,
-                'conversation_id': None,
-                'message': 'No conversation found for this user and event'
-            }, status=status.HTTP_200_OK)
-            
-    except Exception as e:
-        return Response({
-            'success': False,
-            'message': 'An error occurred while checking conversation',
-            'error': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+# REMOVED: check_conversation() - Replaced by get_conversation_by_event()
+# GET /api/conversations/check/ endpoint removed - use GET /api/conversations/event/{event_id}/my-conversation/ instead
 
 
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])  # Require authentication
 @csrf_exempt
 def create_conversation(request):
     """
-    Create a new conversation with initial message
+    Create a new conversation or add message to existing conversation
     POST /api/conversations/
-    Input: event_id, user_id, message
+    Input: event_id, message
+    
+    Behavior:
+    - If conversation doesn't exist: Creates conversation + adds message
+    - If conversation already exists: Adds message to existing conversation
+    - Works for both attendee (user) and host sending messages
+    
+    Note: user_id is extracted from authenticated user (JWT token)
+    Authentication required: Yes
     """
     try:
-        serializer = ConversationCreateSerializer(data=request.data)
-        if serializer.is_valid():
-            conversation = serializer.save()
-            
+        # Get user from authenticated request
+        authenticated_user = request.user
+        
+        # Get data from request
+        event_id = request.data.get('event_id')
+        message_text = request.data.get('message')
+        
+        if not event_id or not message_text:
             return Response({
-                'success': True,
-                'message': 'Conversation created successfully',
-                'conversation_id': conversation.id,
-                'event_id': conversation.event.id,
-                'user_id': conversation.user.id,
-                'host_id': conversation.host.id
-            }, status=status.HTTP_201_CREATED)
+                'success': False,
+                'message': 'event_id and message are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get the event
+        try:
+            event = Event.objects.get(id=event_id)
+        except Event.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Event not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if conversation already exists where authenticated user is participant
+        # User can be either the attendee (user) OR the organizer (host)
+        conversation = None
+        conversation_exists = False
+        
+        try:
+            # Try to find conversation where user is either the attendee or the host
+            conversation = Conversation.objects.get(
+                Q(event_id=event_id, user=authenticated_user) |
+                Q(event_id=event_id, host=authenticated_user)
+            )
+            conversation_exists = True
+            
+            # Add message to existing conversation
+            Message.objects.create(
+                conversation=conversation,
+                sender=authenticated_user,
+                text=message_text
+            )
+            
+        except Conversation.DoesNotExist:
+            # No existing conversation - create new one
+            # The authenticated user is requesting to join the event (they are the attendee)
+            conversation, created = Conversation.objects.get_or_create(
+                event=event,
+                user=authenticated_user,
+                host=event.organizer_id,
+                defaults={}
+            )
+            
+            # Add the initial message
+            Message.objects.create(
+                conversation=conversation,
+                sender=authenticated_user,
+                text=message_text
+            )
+            conversation_exists = False
+        
+        # Get the latest message count
+        message_count = conversation.messages.count()
         
         return Response({
-            'success': False,
-            'message': 'Validation failed',
-            'errors': serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
+            'success': True,
+            'message': 'Message sent successfully' if conversation_exists else 'Conversation created successfully',
+            'conversation_id': conversation.id,
+            'event_id': conversation.event.id,
+            'user_id': conversation.user.id,
+            'host_id': conversation.host.id,
+            'message_count': message_count,
+            'is_new_conversation': not conversation_exists
+        }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
         return Response({
             'success': False,
-            'message': 'An error occurred while creating conversation',
+            'message': 'An error occurred while processing your request',
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])  # Require authentication
 def get_conversation(request, conversation_id):
     """
-    Get a specific conversation with all messages
+    Get a specific conversation with all messages (Authenticated)
     GET /api/conversations/{conversation_id}/
+    
+    Returns complete conversation details with:
+    - Event information
+    - User (attendee) details
+    - Host (organizer) details  
+    - All messages with sender information
+    
+    Authentication required: Yes
     """
     try:
         try:
@@ -613,13 +703,45 @@ def get_conversation(request, conversation_id):
                 'message': 'Conversation not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Serialize conversation with messages
-        conversation_serializer = ConversationSerializer(conversation)
+        # Serialize messages with full sender details
         messages_serializer = MessageSerializer(conversation.messages.all().order_by('created_at'), many=True)
         
+        # Build comprehensive response
         return Response({
             'success': True,
-            'conversation': conversation_serializer.data,
+            'conversation': {
+                'id': conversation.id,
+                'status': conversation.status,
+                'created_at': conversation.created_at,
+                'updated_at': conversation.updated_at,
+                'confirmed_at': conversation.confirmed_at,
+                'rejected_at': conversation.rejected_at,
+                'event': {
+                    'id': conversation.event.id,
+                    'title': conversation.event.title,
+                    'description': conversation.event.description,
+                    'start_date': conversation.event.start_date,
+                    'end_date': conversation.event.end_date,
+                    'start_time': conversation.event.start_time,
+                    'end_time': conversation.event.end_time,
+                    'city': conversation.event.city,
+                    'state': conversation.event.state,
+                    'max_attendees': conversation.event.max_attendees,
+                    'confirmed_attendees': conversation.event.confirmed_attendees,
+                    'is_full': conversation.event.is_full
+                },
+                'user': {
+                    'id': conversation.user.id,
+                    'name': conversation.user.name,
+                    'email': conversation.user.email
+                },
+                'host': {
+                    'id': conversation.host.id,
+                    'name': conversation.host.name,
+                    'email': conversation.host.email
+                },
+                'message_count': conversation.messages.count()
+            },
             'messages': messages_serializer.data
         }, status=status.HTTP_200_OK)
         
@@ -632,39 +754,218 @@ def get_conversation(request, conversation_id):
 
 
 @api_view(['GET'])
-def get_user_conversations(request, user_id):
+@permission_classes([IsAuthenticated])  # Require authentication
+def get_conversation_by_event(request, event_id):
     """
-    Get all conversations for a specific user
-    GET /api/conversations/user/{user_id}/
+    Get conversation for authenticated user and specific event
+    GET /api/conversations/event/{event_id}/my-conversation/
+    
+    Uses:
+    - event_id from URL parameter
+    - user_id from JWT token (authenticated user)
+    
+    Returns complete conversation with all messages if exists,
+    or 404 if no conversation found.
+    
+    Authentication required: Yes
     """
     try:
-        conversations = Conversation.objects.filter(
-            Q(user_id=user_id) | Q(host_id=user_id)
-        ).select_related('event', 'user', 'host').prefetch_related('messages').order_by('-updated_at')
+        # Get authenticated user from JWT token
+        authenticated_user = request.user
         
-        serializer = ConversationSerializer(conversations, many=True)
+        # Find conversation for this user and event
+        try:
+            conversation = Conversation.objects.select_related(
+                'event', 'user', 'host'
+            ).prefetch_related(
+                'messages__sender'
+            ).get(
+                event_id=event_id,
+                user=authenticated_user
+            )
+        except Conversation.DoesNotExist:
+            return Response({
+                'success': False,
+                'exists': False,
+                'message': 'No conversation found for this event'
+            }, status=status.HTTP_404_NOT_FOUND)
         
+        # Serialize messages with full sender details
+        messages_serializer = MessageSerializer(
+            conversation.messages.all().order_by('created_at'), 
+            many=True
+        )
+        
+        # Build comprehensive response
         return Response({
             'success': True,
-            'count': conversations.count(),
-            'conversations': serializer.data
+            'exists': True,
+            'conversation': {
+                'id': conversation.id,
+                'status': conversation.status,
+                'created_at': conversation.created_at,
+                'updated_at': conversation.updated_at,
+                'confirmed_at': conversation.confirmed_at,
+                'rejected_at': conversation.rejected_at,
+                'event': {
+                    'id': conversation.event.id,
+                    'title': conversation.event.title,
+                    'description': conversation.event.description,
+                    'start_date': conversation.event.start_date,
+                    'end_date': conversation.event.end_date,
+                    'start_time': conversation.event.start_time,
+                    'end_time': conversation.event.end_time,
+                    'city': conversation.event.city,
+                    'state': conversation.event.state,
+                    'max_attendees': conversation.event.max_attendees,
+                    'confirmed_attendees': conversation.event.confirmed_attendees,
+                    'is_full': conversation.event.is_full
+                },
+                'user': {
+                    'id': conversation.user.id,
+                    'name': conversation.user.name,
+                    'email': conversation.user.email
+                },
+                'host': {
+                    'id': conversation.host.id,
+                    'name': conversation.host.name,
+                    'email': conversation.host.email
+                },
+                'message_count': conversation.messages.count()
+            },
+            'messages': messages_serializer.data
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
         return Response({
             'success': False,
-            'message': 'An error occurred while fetching user conversations',
+            'message': 'An error occurred while fetching conversation',
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])  # Require authentication
+def get_my_conversations(request):
+    """
+    Get all conversations for authenticated user
+    GET /api/conversations/my-conversations/
+    
+    Returns all conversations where user is either:
+    - The attendee (user) requesting to join events
+    - The host (organizer) receiving requests
+    
+    Each conversation includes:
+    - Event details
+    - Other participant info
+    - Last message preview
+    - Message count
+    - Conversation status
+    
+    Authentication required: Yes
+    """
+    try:
+        # Get authenticated user from JWT token
+        authenticated_user = request.user
+        
+        # Get all conversations where user is participant (as user or host)
+        conversations = Conversation.objects.filter(
+            Q(user=authenticated_user) | Q(host=authenticated_user)
+        ).select_related('event', 'user', 'host').prefetch_related('messages')
+        
+        # Build enhanced response with sorting by latest message
+        conversations_data = []
+        for conversation in conversations:
+            # Determine the "other person" in the conversation
+            if conversation.user == authenticated_user:
+                # Current user is the attendee
+                other_person = conversation.host
+                my_role = 'attendee'
+            else:
+                # Current user is the host/organizer
+                other_person = conversation.user
+                my_role = 'host'
+            
+            # Get last message
+            last_message = conversation.messages.last()
+            
+            # Count unread messages (messages from other person that current user hasn't read)
+            unread_count = conversation.messages.filter(
+                is_read=False
+            ).exclude(sender=authenticated_user).count()
+            
+            conversations_data.append({
+                'conversation_id': conversation.id,
+                'status': conversation.status,
+                'created_at': conversation.created_at,
+                'updated_at': conversation.updated_at,
+                'my_role': my_role,
+                'event': {
+                    'id': conversation.event.id,
+                    'title': conversation.event.title,
+                    'start_date': conversation.event.start_date,
+                    'end_date': conversation.event.end_date,
+                    'city': conversation.event.city,
+                    'state': conversation.event.state
+                },
+                'other_person': {
+                    'id': other_person.id,
+                    'name': other_person.name,
+                    'email': other_person.email
+                },
+                'last_message': {
+                    'id': last_message.id,
+                    'text': last_message.text,
+                    'sender_name': last_message.sender.name,
+                    'sender_id': last_message.sender.id,
+                    'created_at': last_message.created_at,
+                    'is_read': last_message.is_read
+                } if last_message else None,
+                'message_count': conversation.messages.count(),
+                'unread_count': unread_count,
+                # Add timestamp for sorting
+                'last_message_time': last_message.created_at if last_message else conversation.created_at
+            })
+        
+        # Sort by last message time (most recent first)
+        conversations_data.sort(key=lambda x: x['last_message_time'], reverse=True)
+        
+        # Remove the sorting field from response
+        for conv in conversations_data:
+            del conv['last_message_time']
+        
+        return Response({
+            'success': True,
+            'count': len(conversations_data),
+            'conversations': conversations_data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching conversations',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# REMOVED: get_user_conversations() - Legacy endpoint, replaced by get_my_conversations()
+# GET /api/conversations/user/{user_id}/ endpoint removed - use GET /api/conversations/my-conversations/ instead
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])  # Require authentication
 def get_event_conversations(request, event_id):
     """
     Get all conversations for a specific event with event details and images
     GET /api/conversations/event/{event_id}/
+    
+    Note: Only the event organizer (host) can view this list
+    Authentication required: Yes
     """
     try:
+        # Get authenticated user
+        authenticated_user = request.user
+        
         # Get the event first to include event details
         try:
             event = Event.objects.prefetch_related('images').get(id=event_id)
@@ -673,6 +974,13 @@ def get_event_conversations(request, event_id):
                 'success': False,
                 'message': 'Event not found'
             }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Verify that the authenticated user is the event organizer (host)
+        if event.organizer_id != authenticated_user:
+            return Response({
+                'success': False,
+                'message': 'Only the event organizer can view the list of attendees'
+            }, status=status.HTTP_403_FORBIDDEN)
         
         # Get all conversations for this event
         conversations = Conversation.objects.filter(
@@ -698,8 +1006,31 @@ def get_event_conversations(request, event_id):
                 'uploaded_at': img.uploaded_at
             })
         
-        # Serialize conversations
-        conversation_serializer = ConversationSerializer(conversations, many=True)
+        # Build enhanced conversations list for host
+        conversations_data = []
+        for conv in conversations:
+            # Get last message
+            last_message = conv.messages.last()
+            
+            conversations_data.append({
+                'conversation_id': conv.id,
+                'user_id': conv.user.id,
+                'user_name': conv.user.name,
+                'user_email': conv.user.email,
+                'status': conv.status,
+                'created_at': conv.created_at,
+                'updated_at': conv.updated_at,
+                'confirmed_at': conv.confirmed_at,
+                'rejected_at': conv.rejected_at,
+                'last_message': {
+                    'id': last_message.id,
+                    'text': last_message.text,
+                    'sender_name': last_message.sender.name,
+                    'sender_id': last_message.sender.id,
+                    'created_at': last_message.created_at
+                } if last_message else None,
+                'message_count': conv.messages.count()
+            })
         
         # Prepare event details
         event_data = {
@@ -725,18 +1056,18 @@ def get_event_conversations(request, event_id):
             'created_at': event.created_at,
             'updated_at': event.updated_at,
             'organizer': {
-                'id': event.organizer.id,
-                'name': event.organizer.name,
-                'email': event.organizer.email
+                'id': event.organizer_id.id,
+                'name': event.organizer_id.name,
+                'email': event.organizer_id.email
             },
             'images': images
         }
         
         return Response({
             'success': True,
-            'count': conversations.count(),
+            'count': len(conversations_data),
             'event': event_data,
-            'conversations': conversation_serializer.data
+            'conversations': conversations_data
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
@@ -747,251 +1078,107 @@ def get_event_conversations(request, event_id):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# REMOVED: send_message() - Replaced by create_conversation()
+# POST /api/messages/ endpoint removed - use POST /api/conversations/ instead (handles both new and existing conversations)
+
+
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])  # Require authentication
 @csrf_exempt
-def send_message(request):
+def mark_messages_as_read(request):
     """
-    Send a message to an existing conversation
-    POST /api/messages/
-    Input: conversation_id, sender_id, text
+    Mark messages as read for a conversation
+    POST /api/messages/mark-read/
+    Input: conversation_id
+    
+    Marks all unread messages from the other person as read
+    Authentication required: Yes
     """
     try:
-        conversation_id = request.data.get('conversation_id')
-        sender_id = request.data.get('sender_id')
-        text = request.data.get('text')
+        # Get authenticated user
+        authenticated_user = request.user
         
-        if not all([conversation_id, sender_id, text]):
+        conversation_id = request.data.get('conversation_id')
+        
+        if not conversation_id:
             return Response({
                 'success': False,
-                'message': 'conversation_id, sender_id, and text are required'
+                'message': 'conversation_id is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Get conversation
         try:
             conversation = Conversation.objects.get(id=conversation_id)
-            sender = User.objects.get(id=sender_id)
         except Conversation.DoesNotExist:
             return Response({
                 'success': False,
                 'message': 'Conversation not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        except User.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'Sender not found'
-            }, status=status.HTTP_404_NOT_FOUND)
         
-        # Check if sender is part of the conversation
-        if sender not in [conversation.user, conversation.host]:
+        # Verify user is part of the conversation
+        if authenticated_user not in [conversation.user, conversation.host]:
             return Response({
                 'success': False,
-                'message': 'You are not authorized to send messages to this conversation'
+                'message': 'You are not authorized to access this conversation'
             }, status=status.HTTP_403_FORBIDDEN)
         
-        # Create message
-        message = Message.objects.create(
+        # Mark all unread messages from the OTHER person as read
+        # (Don't mark own messages as read)
+        from django.utils import timezone
+        
+        unread_messages = Message.objects.filter(
             conversation=conversation,
-            sender=sender,
-            text=text
+            is_read=False
+        ).exclude(sender=authenticated_user)
+        
+        # Get count before updating
+        unread_count = unread_messages.count()
+        
+        # Update all unread messages
+        unread_messages.update(
+            is_read=True,
+            read_at=timezone.now()
         )
         
-        # Update conversation's updated_at field
-        conversation.save()
-        
-        serializer = MessageSerializer(message)
-        
         return Response({
             'success': True,
-            'message': 'Message sent successfully',
-            'message_data': serializer.data
-        }, status=status.HTTP_201_CREATED)
-        
-    except Exception as e:
-        return Response({
-            'success': False,
-            'message': 'An error occurred while sending message',
-            'error': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET'])
-def get_conversation_messages(request, conversation_id):
-    """
-    Get all messages for a specific conversation
-    GET /api/conversations/{conversation_id}/messages/
-    """
-    try:
-        try:
-            conversation = Conversation.objects.get(id=conversation_id)
-        except Conversation.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': 'Conversation not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        messages = conversation.messages.select_related('sender').order_by('created_at')
-        serializer = MessageSerializer(messages, many=True)
-        
-        return Response({
-            'success': True,
-            'conversation_id': conversation_id,
-            'count': messages.count(),
-            'messages': serializer.data
+            'message': f'{unread_count} messages marked as read',
+            'marked_count': unread_count
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
         return Response({
             'success': False,
-            'message': 'An error occurred while fetching messages',
+            'message': 'An error occurred while marking messages as read',
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-@api_view(['GET'])
-def get_user_confirmed_events(request, user_id):
-    """
-    Get all events where user has confirmed status with complete event details
-    GET /api/conversations/user/{user_id}/confirmed-events/
-    """
-    try:
-        # Get all conversations where user has confirmed status
-        confirmed_conversations = Conversation.objects.filter(
-            user_id=user_id,
-            status='confirmed'
-        ).select_related('event', 'host').prefetch_related('event__images').order_by('-confirmed_at')
-        
-        # Extract unique events from conversations
-        events_data = []
-        seen_events = set()
-        
-        for conversation in confirmed_conversations:
-            if conversation.event.id not in seen_events:
-                seen_events.add(conversation.event.id)
-                event = conversation.event
-                
-                # Get all images for this event
-                images = []
-                for img in event.images.all():
-                    # Get full URL for the image
-                    image_url = None
-                    if img.image:
-                        # Build full URL
-                        from django.conf import settings
-                        image_url = f"{request.scheme}://{request.get_host()}{img.image.url}"
-                    
-                    images.append({
-                        'id': img.id,
-                        'image': image_url,
-                        'image_path': img.image.url if img.image else None,  # Keep relative path too
-                        'caption': img.caption,
-                        'is_primary': img.is_primary,
-                        'uploaded_at': img.uploaded_at
-                    })
-                
-                # Get all participants for this event (all confirmed conversations)
-                participants = []
-                all_conversations = Conversation.objects.filter(
-                    event=event,
-                    status='confirmed'
-                ).select_related('user')
-                
-                for conv in all_conversations:
-                    participants.append({
-                        'user_id': conv.user.id,
-                        'user_name': conv.user.name,
-                        'user_email': conv.user.email,
-                        'confirmed_at': conv.confirmed_at,
-                        'conversation_id': conv.id
-                    })
-                
-                # Get all pending requests for this event
-                pending_requests = []
-                pending_conversations = Conversation.objects.filter(
-                    event=event,
-                    status='pending'
-                ).select_related('user')
-                
-                for conv in pending_conversations:
-                    pending_requests.append({
-                        'user_id': conv.user.id,
-                        'user_name': conv.user.name,
-                        'user_email': conv.user.email,
-                        'created_at': conv.created_at,
-                        'conversation_id': conv.id
-                    })
-                
-                events_data.append({
-                    # Basic event info
-                    'id': event.id,
-                    'title': event.title,
-                    'description': event.description,
-                    'start_date': event.start_date,
-                    'end_date': event.end_date,
-                    'start_time': event.start_time,
-                    'end_time': event.end_time,
-                    'location': {
-                        'street': event.street,
-                        'city': event.city,
-                        'state': event.state,
-                        'postal_code': event.postal_code,
-                        'full_address': event.full_address
-                    },
-                    'max_attendees': event.max_attendees,
-                    'confirmed_attendees': event.confirmed_attendees,
-                    'available_spots': event.available_spots,
-                    'is_full': event.is_full,
-                    'is_active': event.is_active,
-                    'created_at': event.created_at,
-                    'updated_at': event.updated_at,
-                    
-                    # Organizer info
-                    'organizer': {
-                        'id': event.organizer.id,
-                        'name': event.organizer.name,
-                        'email': event.organizer.email
-                    },
-                    
-                    # Images
-                    'images': images,
-                    
-                    # Participants
-                    'participants': participants,
-                    'participant_count': len(participants),
-                    
-                    # Pending requests
-                    'pending_requests': pending_requests,
-                    'pending_count': len(pending_requests),
-                    
-                    # User's confirmation info
-                    'user_confirmation': {
-                        'confirmed_at': conversation.confirmed_at,
-                        'conversation_id': conversation.id
-                    }
-                })
-        
-        return Response({
-            'success': True,
-            'count': len(events_data),
-            'user_id': user_id,
-            'confirmed_events': events_data
-        }, status=status.HTTP_200_OK)
-        
-    except Exception as e:
-        return Response({
-            'success': False,
-            'message': 'An error occurred while fetching confirmed events',
-            'error': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+# REMOVED: get_conversation_messages() - Redundant, messages already included in get_conversation()
+# GET /api/conversations/{conversation_id}/messages/ endpoint removed - use GET /api/conversations/{conversation_id}/ instead
+
+
+# REMOVED: get_user_confirmed_events() - Not used by frontend
+# GET /api/conversations/user/{user_id}/confirmed-events/ endpoint removed
+# Frontend filters confirmed events from GET /api/conversations/my-conversations/ with status='confirmed'
 
 
 @api_view(['PATCH'])
+@permission_classes([IsAuthenticated])  # Require authentication
 @csrf_exempt
 def update_conversation_status(request, conversation_id):
     """
     Update conversation status (confirm/reject)
     PATCH /api/conversations/{conversation_id}/status/
     Input: status (confirmed/rejected)
+    
+    Note: Only the host (event organizer) can update conversation status
+    Authentication required: Yes
     """
     try:
+        # Get authenticated user
+        authenticated_user = request.user
+        
         try:
             conversation = Conversation.objects.get(id=conversation_id)
         except Conversation.DoesNotExist:
@@ -999,6 +1186,13 @@ def update_conversation_status(request, conversation_id):
                 'success': False,
                 'message': 'Conversation not found'
             }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Verify user is the host (event organizer) who can update status
+        if authenticated_user != conversation.host:
+            return Response({
+                'success': False,
+                'message': 'Only the event organizer can update conversation status'
+            }, status=status.HTTP_403_FORBIDDEN)
         
         serializer = ConversationStatusUpdateSerializer(conversation, data=request.data, partial=True)
         if serializer.is_valid():
