@@ -34,6 +34,17 @@ urlpatterns = [
     # Message endpoints (Active - Used by Frontend)
     path('messages/mark-read/', views.mark_messages_as_read, name='mark_messages_as_read'),  # Mark messages as read
     
+    # Review endpoints
+    path('reviews/', views.create_review, name='create_review'),  # Create a review
+    path('reviews/<int:review_id>/', views.update_review, name='update_review'),  # Update a review
+    path('reviews/<int:review_id>/delete/', views.delete_review, name='delete_review'),  # Delete a review
+    path('reviews/my-reviews/', views.get_my_reviews, name='get_my_reviews'),  # Get my reviews
+    path('reviews/event/<int:event_id>/', views.get_event_reviews, name='get_event_reviews'),  # Get event reviews
+    path('reviews/event/<int:event_id>/stats/', views.get_event_rating_stats, name='get_event_rating_stats'),  # Get event stats
+    path('reviews/host/<int:host_id>/', views.get_host_reviews, name='get_host_reviews'),  # Get host reviews
+    path('reviews/host/<int:host_id>/stats/', views.get_host_rating_stats, name='get_host_rating_stats'),  # Get host stats
+    path('reviews/can-review/<int:event_id>/', views.check_can_review, name='check_can_review'),  # Check if user can review
+    
     # Event endpoints
     path('', include(router.urls)),
 ] 

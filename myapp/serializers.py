@@ -1,9 +1,10 @@
 from rest_framework import serializers
-from .models import User, Event, EventImage, Conversation, Message, Category
+from .models import User, Event, EventImage, Conversation, Message, Category, Review
 import re
 from datetime import datetime, date, time
 from django.core.exceptions import ValidationError
 from django.contrib.auth.hashers import make_password
+from django.db.models import Avg, Count
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -139,6 +140,8 @@ class EventSerializer(serializers.ModelSerializer):
     is_past = serializers.BooleanField(read_only=True)
     primary_image = serializers.SerializerMethodField()
     image_count = serializers.SerializerMethodField()
+    host_average_rating = serializers.SerializerMethodField()
+    host_total_reviews = serializers.SerializerMethodField()
     
     class Meta:
         model = Event
@@ -148,6 +151,7 @@ class EventSerializer(serializers.ModelSerializer):
             'start_date', 'end_date', 'start_time', 'end_time',
             'street', 'city', 'state', 'postal_code',
             'organizer_id', 'organizer_name', 'organizer_email',
+            'host_average_rating', 'host_total_reviews',
             'is_active', 'created_at', 'updated_at',
             'images', 'primary_image', 'image_count',
             'full_address', 'is_upcoming', 'is_past'
@@ -167,6 +171,18 @@ class EventSerializer(serializers.ModelSerializer):
     def get_image_count(self, obj):
         """Get total number of images"""
         return obj.images.count()
+    
+    def get_host_average_rating(self, obj):
+        """Get average rating for the event host across all their events"""
+        host_reviews = Review.objects.filter(host_id=obj.organizer_id.id)
+        if host_reviews.exists():
+            avg_rating = host_reviews.aggregate(Avg('rating'))['rating__avg']
+            return round(avg_rating, 1) if avg_rating else 0
+        return 0
+    
+    def get_host_total_reviews(self, obj):
+        """Get total number of reviews for the event host"""
+        return Review.objects.filter(host_id=obj.organizer_id.id).count()
 
 
 
@@ -337,6 +353,8 @@ class EventListSerializer(serializers.ModelSerializer):
     is_full = serializers.BooleanField(read_only=True)
     is_upcoming = serializers.BooleanField(read_only=True)
     is_past = serializers.BooleanField(read_only=True)
+    host_average_rating = serializers.SerializerMethodField()
+    host_total_reviews = serializers.SerializerMethodField()
     
     class Meta:
         model = Event
@@ -345,6 +363,7 @@ class EventListSerializer(serializers.ModelSerializer):
             'max_attendees', 'confirmed_attendees', 'available_spots', 'is_full',
             'start_date', 'end_date', 'start_time', 'end_time',
             'city', 'state', 'organizer_id', 'organizer_name', 'organizer_email',
+            'host_average_rating', 'host_total_reviews',
             'is_active', 'created_at', 
             'primary_image', 'all_images', 'image_count', 
             'full_address', 'is_upcoming', 'is_past'
@@ -381,6 +400,18 @@ class EventListSerializer(serializers.ModelSerializer):
     def get_image_count(self, obj):
         """Get total number of images"""
         return obj.images.count()
+    
+    def get_host_average_rating(self, obj):
+        """Get average rating for the event host across all their events"""
+        host_reviews = Review.objects.filter(host_id=obj.organizer_id.id)
+        if host_reviews.exists():
+            avg_rating = host_reviews.aggregate(Avg('rating'))['rating__avg']
+            return round(avg_rating, 1) if avg_rating else 0
+        return 0
+    
+    def get_host_total_reviews(self, obj):
+        """Get total number of reviews for the event host"""
+        return Review.objects.filter(host_id=obj.organizer_id.id).count()
 
 
 class ConversationCreateSerializer(serializers.ModelSerializer):
@@ -521,6 +552,135 @@ class ConversationStatusUpdateSerializer(serializers.ModelSerializer):
             instance.save()
         
         return instance
+
+
+class ReviewSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Review model with full details
+    """
+    reviewer_name = serializers.CharField(source='reviewer.name', read_only=True)
+    reviewer_email = serializers.CharField(source='reviewer.email', read_only=True)
+    event_title = serializers.CharField(source='event.title', read_only=True)
+    host_name = serializers.CharField(source='host.name', read_only=True)
+    
+    class Meta:
+        model = Review
+        fields = [
+            'id', 'event', 'event_title', 'host', 'host_name',
+            'reviewer', 'reviewer_name', 'reviewer_email',
+            'rating', 'comment', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ReviewCreateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating reviews
+    Frontend sends: event_id, host_id (optional), rating, comment
+    Backend auto-fills: reviewer from authenticated user
+    """
+    event_id = serializers.IntegerField(write_only=True)
+    host_id = serializers.IntegerField(write_only=True, required=False)
+    
+    class Meta:
+        model = Review
+        fields = ['event_id', 'host_id', 'rating', 'comment']
+    
+    def validate_rating(self, value):
+        """Validate rating is between 1 and 5"""
+        if value < 1 or value > 5:
+            raise serializers.ValidationError("Rating must be between 1 and 5")
+        return value
+    
+    def validate(self, attrs):
+        """Validate event exists and get host if not provided"""
+        event_id = attrs.get('event_id')
+        
+        # Check if event exists
+        try:
+            event = Event.objects.get(id=event_id)
+        except Event.DoesNotExist:
+            raise serializers.ValidationError({"event_id": "Event not found"})
+        
+        # Get host from event if not provided
+        if 'host_id' not in attrs or not attrs['host_id']:
+            attrs['host_id'] = event.organizer_id.id
+        
+        # Validate host exists
+        try:
+            host = User.objects.get(id=attrs['host_id'])
+        except User.DoesNotExist:
+            raise serializers.ValidationError({"host_id": "Host not found"})
+        
+        # Check if user is trying to review their own event
+        reviewer = self.context.get('request').user
+        if reviewer.id == host.id:
+            raise serializers.ValidationError("You cannot review your own event")
+        
+        # Check if user already reviewed this event
+        existing_review = Review.objects.filter(
+            event_id=event_id,
+            reviewer_id=reviewer.id
+        ).first()
+        
+        if existing_review:
+            raise serializers.ValidationError("You have already reviewed this event")
+        
+        attrs['event'] = event
+        attrs['host'] = host
+        return attrs
+    
+    def create(self, validated_data):
+        """Create review with authenticated user as reviewer"""
+        event_id = validated_data.pop('event_id')
+        host_id = validated_data.pop('host_id')
+        
+        review = Review.objects.create(
+            event_id=event_id,
+            host_id=host_id,
+            reviewer=self.context.get('request').user,
+            **validated_data
+        )
+        
+        return review
+
+
+class ReviewUpdateSerializer(serializers.ModelSerializer):
+    """
+    Serializer for updating reviews (only rating and comment can be updated)
+    """
+    class Meta:
+        model = Review
+        fields = ['rating', 'comment']
+    
+    def validate_rating(self, value):
+        """Validate rating is between 1 and 5"""
+        if value < 1 or value > 5:
+            raise serializers.ValidationError("Rating must be between 1 and 5")
+        return value
+
+
+class HostRatingSerializer(serializers.Serializer):
+    """
+    Serializer for host rating statistics
+    """
+    host_id = serializers.IntegerField()
+    host_name = serializers.CharField()
+    host_email = serializers.CharField()
+    average_rating = serializers.FloatField()
+    total_reviews = serializers.IntegerField()
+    rating_distribution = serializers.DictField()
+
+
+class EventRatingSerializer(serializers.Serializer):
+    """
+    Serializer for event rating statistics
+    """
+    event_id = serializers.IntegerField()
+    event_title = serializers.CharField()
+    average_rating = serializers.FloatField()
+    total_reviews = serializers.IntegerField()
+    rating_distribution = serializers.DictField()
 
 
     

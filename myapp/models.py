@@ -229,5 +229,56 @@ class Message(models.Model):
         ]
 
 
+class Review(models.Model):
+    """
+    Model for event and host reviews
+    Users can review events they've attended, which also affects the host's rating
+    """
+    event = models.ForeignKey(
+        Event, 
+        on_delete=models.CASCADE, 
+        related_name='reviews',
+        help_text="Event being reviewed"
+    )
+    host = models.ForeignKey(
+        User, 
+        on_delete=models.CASCADE, 
+        related_name='received_reviews',
+        help_text="Host being reviewed (event organizer)"
+    )
+    reviewer = models.ForeignKey(
+        User, 
+        on_delete=models.CASCADE, 
+        related_name='given_reviews',
+        help_text="User who wrote the review"
+    )
+    rating = models.PositiveIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="Rating from 1 to 5 stars"
+    )
+    comment = models.TextField(
+        blank=True,
+        help_text="Review comment/feedback"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Review by {self.reviewer.name} for {self.event.title} ({self.rating}⭐)"
+    
+    class Meta:
+        db_table = 'reviews'
+        verbose_name = 'Review'
+        verbose_name_plural = 'Reviews'
+        ordering = ['-created_at']
+        unique_together = ('event', 'reviewer')  # One review per user per event
+        indexes = [
+            models.Index(fields=['event', '-created_at']),
+            models.Index(fields=['host', '-created_at']),
+            models.Index(fields=['reviewer']),
+            models.Index(fields=['rating']),
+        ]
+
+
 
 

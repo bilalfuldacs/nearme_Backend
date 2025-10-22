@@ -13,8 +13,8 @@ from django.utils import timezone
 from django.contrib.auth.hashers import make_password, check_password
 from datetime import date
 from rest_framework_simplejwt.tokens import RefreshToken
-from .serializers import UserSerializer, LoginSerializer, EventSerializer, EventCreateSerializer, EventListSerializer, EventImageUploadSerializer, ConversationCreateSerializer, ConversationSerializer, MessageSerializer, ConversationStatusUpdateSerializer, CategorySerializer
-from .models import User, Event, EventImage, Conversation, Message, Category
+from .serializers import UserSerializer, LoginSerializer, EventSerializer, EventCreateSerializer, EventListSerializer, EventImageUploadSerializer, ConversationCreateSerializer, ConversationSerializer, MessageSerializer, ConversationStatusUpdateSerializer, CategorySerializer, ReviewSerializer, ReviewCreateSerializer, ReviewUpdateSerializer, HostRatingSerializer, EventRatingSerializer
+from .models import User, Event, EventImage, Conversation, Message, Category, Review
 from .jwt_utils import get_tokens_for_user
 
 @api_view(['POST'])
@@ -516,14 +516,40 @@ class EventViewSet(ModelViewSet):
     
     def retrieve(self, request, *args, **kwargs):
         """
-        Retrieve a specific event
+        Retrieve a specific event with host reviews
         """
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
+            
+            # Get all reviews for the host across all their events
+            host_reviews = Review.objects.filter(
+                host_id=instance.organizer_id.id
+            ).order_by('-created_at')
+            
+            # Calculate host rating statistics
+            from django.db.models import Avg, Count
+            host_stats = host_reviews.aggregate(
+                average_rating=Avg('rating'),
+                total_reviews=Count('id')
+            )
+            
+            # Get rating distribution for host
+            host_rating_distribution = {}
+            for i in range(1, 6):
+                host_rating_distribution[str(i)] = host_reviews.filter(rating=i).count()
+            
             return Response({
                 'success': True,
-                'event': serializer.data
+                'event': serializer.data,
+                'host_reviews': {
+                    'statistics': {
+                        'average_rating': round(host_stats['average_rating'], 1) if host_stats['average_rating'] else 0,
+                        'total_reviews': host_stats['total_reviews'],
+                        'rating_distribution': host_rating_distribution
+                    },
+                    'reviews': ReviewSerializer(host_reviews[:10], many=True).data  # Latest 10 reviews
+                }
             }, status=status.HTTP_200_OK)
             
         except Event.DoesNotExist:
@@ -1404,6 +1430,443 @@ def update_conversation_status(request, conversation_id):
         return Response({
             'success': False,
             'message': 'An error occurred while updating conversation status',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ==================== REVIEW ENDPOINTS ====================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@csrf_exempt
+def create_review(request):
+    """
+    Create a new review for an event and host
+    POST /api/reviews/
+    Body: { "event_id": 1, "host_id": 2 (optional), "rating": 5, "comment": "Great event!" }
+    """
+    try:
+        serializer = ReviewCreateSerializer(data=request.data, context={'request': request})
+        
+        if serializer.is_valid():
+            review = serializer.save()
+            
+            return Response({
+                'success': True,
+                'message': 'Review submitted successfully',
+                'review': ReviewSerializer(review).data
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response({
+            'success': False,
+            'message': 'Validation failed',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while creating review',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_event_reviews(request, event_id):
+    """
+    Get all reviews for a specific event
+    GET /api/reviews/event/{event_id}/
+    """
+    try:
+        # Check if event exists
+        try:
+            event = Event.objects.get(id=event_id)
+        except Event.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Event not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all reviews for the event
+        reviews = Review.objects.filter(event_id=event_id).order_by('-created_at')
+        
+        # Calculate rating statistics
+        from django.db.models import Avg, Count
+        stats = reviews.aggregate(
+            average_rating=Avg('rating'),
+            total_reviews=Count('id')
+        )
+        
+        # Get rating distribution
+        rating_distribution = {}
+        for i in range(1, 6):
+            rating_distribution[str(i)] = reviews.filter(rating=i).count()
+        
+        return Response({
+            'success': True,
+            'event': {
+                'id': event.id,
+                'title': event.title
+            },
+            'statistics': {
+                'average_rating': round(stats['average_rating'], 2) if stats['average_rating'] else 0,
+                'total_reviews': stats['total_reviews'],
+                'rating_distribution': rating_distribution
+            },
+            'reviews': ReviewSerializer(reviews, many=True).data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching event reviews',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_host_reviews(request, host_id):
+    """
+    Get all reviews for a specific host (all their events)
+    GET /api/reviews/host/{host_id}/
+    """
+    try:
+        # Check if host exists
+        try:
+            host = User.objects.get(id=host_id)
+        except User.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Host not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all reviews for the host
+        reviews = Review.objects.filter(host_id=host_id).order_by('-created_at')
+        
+        # Calculate rating statistics
+        from django.db.models import Avg, Count
+        stats = reviews.aggregate(
+            average_rating=Avg('rating'),
+            total_reviews=Count('id')
+        )
+        
+        # Get rating distribution
+        rating_distribution = {}
+        for i in range(1, 6):
+            rating_distribution[str(i)] = reviews.filter(rating=i).count()
+        
+        return Response({
+            'success': True,
+            'host': {
+                'id': host.id,
+                'name': host.name,
+                'email': host.email
+            },
+            'statistics': {
+                'average_rating': round(stats['average_rating'], 2) if stats['average_rating'] else 0,
+                'total_reviews': stats['total_reviews'],
+                'rating_distribution': rating_distribution
+            },
+            'reviews': ReviewSerializer(reviews, many=True).data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching host reviews',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_my_reviews(request):
+    """
+    Get all reviews written by the authenticated user
+    GET /api/reviews/my-reviews/
+    """
+    try:
+        user = request.user
+        
+        # Get all reviews by the user
+        reviews = Review.objects.filter(reviewer_id=user.id).order_by('-created_at')
+        
+        return Response({
+            'success': True,
+            'message': f'Found {reviews.count()} reviews',
+            'reviews': ReviewSerializer(reviews, many=True).data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching your reviews',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+@csrf_exempt
+def update_review(request, review_id):
+    """
+    Update a review (only your own reviews)
+    PUT/PATCH /api/reviews/{review_id}/
+    Body: { "rating": 4, "comment": "Updated comment" }
+    """
+    try:
+        user = request.user
+        
+        # Get the review
+        try:
+            review = Review.objects.get(id=review_id)
+        except Review.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Review not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if user is the reviewer
+        if review.reviewer_id != user.id:
+            return Response({
+                'success': False,
+                'message': 'You can only update your own reviews'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Update the review
+        serializer = ReviewUpdateSerializer(review, data=request.data, partial=True)
+        
+        if serializer.is_valid():
+            updated_review = serializer.save()
+            
+            return Response({
+                'success': True,
+                'message': 'Review updated successfully',
+                'review': ReviewSerializer(updated_review).data
+            }, status=status.HTTP_200_OK)
+        
+        return Response({
+            'success': False,
+            'message': 'Validation failed',
+            'errors': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while updating review',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+@csrf_exempt
+def delete_review(request, review_id):
+    """
+    Delete a review (only your own reviews)
+    DELETE /api/reviews/{review_id}/
+    """
+    try:
+        user = request.user
+        
+        # Get the review
+        try:
+            review = Review.objects.get(id=review_id)
+        except Review.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Review not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if user is the reviewer
+        if review.reviewer_id != user.id:
+            return Response({
+                'success': False,
+                'message': 'You can only delete your own reviews'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Delete the review
+        review_data = ReviewSerializer(review).data
+        review.delete()
+        
+        return Response({
+            'success': True,
+            'message': 'Review deleted successfully',
+            'deleted_review': review_data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while deleting review',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_event_rating_stats(request, event_id):
+    """
+    Get rating statistics for an event
+    GET /api/reviews/event/{event_id}/stats/
+    """
+    try:
+        # Check if event exists
+        try:
+            event = Event.objects.get(id=event_id)
+        except Event.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Event not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get reviews for the event
+        reviews = Review.objects.filter(event_id=event_id)
+        
+        # Calculate statistics
+        from django.db.models import Avg, Count
+        stats = reviews.aggregate(
+            average_rating=Avg('rating'),
+            total_reviews=Count('id')
+        )
+        
+        # Get rating distribution
+        rating_distribution = {}
+        for i in range(1, 6):
+            count = reviews.filter(rating=i).count()
+            rating_distribution[str(i)] = count
+        
+        return Response({
+            'success': True,
+            'event_id': event.id,
+            'event_title': event.title,
+            'average_rating': round(stats['average_rating'], 2) if stats['average_rating'] else 0,
+            'total_reviews': stats['total_reviews'],
+            'rating_distribution': rating_distribution
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching event rating stats',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_host_rating_stats(request, host_id):
+    """
+    Get rating statistics for a host (across all their events)
+    GET /api/reviews/host/{host_id}/stats/
+    """
+    try:
+        # Check if host exists
+        try:
+            host = User.objects.get(id=host_id)
+        except User.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Host not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get reviews for the host
+        reviews = Review.objects.filter(host_id=host_id)
+        
+        # Calculate statistics
+        from django.db.models import Avg, Count
+        stats = reviews.aggregate(
+            average_rating=Avg('rating'),
+            total_reviews=Count('id')
+        )
+        
+        # Get rating distribution
+        rating_distribution = {}
+        for i in range(1, 6):
+            count = reviews.filter(rating=i).count()
+            rating_distribution[str(i)] = count
+        
+        # Get number of events hosted
+        events_count = Event.objects.filter(organizer_id=host_id).count()
+        
+        return Response({
+            'success': True,
+            'host_id': host.id,
+            'host_name': host.name,
+            'host_email': host.email,
+            'average_rating': round(stats['average_rating'], 2) if stats['average_rating'] else 0,
+            'total_reviews': stats['total_reviews'],
+            'total_events_hosted': events_count,
+            'rating_distribution': rating_distribution
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching host rating stats',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_can_review(request, event_id):
+    """
+    Check if the authenticated user can review an event
+    GET /api/reviews/can-review/{event_id}/
+    Returns: { "can_review": true/false, "reason": "..." }
+    """
+    try:
+        user = request.user
+        
+        # Check if event exists
+        try:
+            event = Event.objects.get(id=event_id)
+        except Event.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': 'Event not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if user is the event organizer
+        if event.organizer_id.id == user.id:
+            return Response({
+                'success': True,
+                'can_review': False,
+                'reason': 'You cannot review your own event'
+            }, status=status.HTTP_200_OK)
+        
+        # Check if user already reviewed this event
+        existing_review = Review.objects.filter(event_id=event_id, reviewer_id=user.id).first()
+        if existing_review:
+            return Response({
+                'success': True,
+                'can_review': False,
+                'reason': 'You have already reviewed this event',
+                'existing_review': ReviewSerializer(existing_review).data
+            }, status=status.HTTP_200_OK)
+        
+        # Check if user has a confirmed conversation for this event (optional check)
+        has_conversation = Conversation.objects.filter(
+            event_id=event_id,
+            user_id=user.id,
+            status='confirmed'
+        ).exists()
+        
+        return Response({
+            'success': True,
+            'can_review': True,
+            'reason': 'You can review this event',
+            'has_attended': has_conversation
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'message': 'An error occurred while checking review eligibility',
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
